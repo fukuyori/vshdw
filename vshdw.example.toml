@@ -1,0 +1,27 @@
+[defaults]
+trash = true
+no_delete = false
+suppress_warnings = false
+low_priority = false
+include_subdirs = true
+include_files = []
+include_file_patterns = []
+exclude_dirs = ["target", "node_modules", ".git"]
+exclude_dir_patterns = ['(^|[\\/¥])\.cache($|[\\/¥])']
+exclude_files = [".DS_Store", "Thumbs.db"]
+exclude_file_patterns = []
+exclude_extensions = ["tmp", "log"]
+exclude_extension_patterns = ['^bak[0-9]+$']
+max_size_bytes = 1073741824
+
+[[jobs]]
+name = "data"
+source = "D:\\Data"
+dest = "E:\\Backup\\Data"
+
+[[jobs]]
+name = "projects"
+sources = ["D:\\Projects", "D:\\Labs"]
+dest = "E:\\Backup\\Projects"
+exclude_dirs = ["target", "dist"]
+exclude_extensions = ["tmp"]
