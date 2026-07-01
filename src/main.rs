@@ -542,7 +542,7 @@ fn normalize_extensions(extensions: Vec<String>) -> HashSet<String> {
 
 fn mirror(job: &Job, args: &Args) -> Result<Summary> {
     lower_process_priority_if_requested(job.low_priority)?;
-    validate_paths(&job.source, &job.dest, args.dry_run)?;
+    validate_paths(&job.source, &job.dest, args.dry_run, job.include_subdirs)?;
 
     println!(
         "[{}] {} -> {}",
@@ -626,7 +626,7 @@ fn lower_process_priority() -> Result<()> {
     Ok(())
 }
 
-fn validate_paths(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
+fn validate_paths(source: &Path, dest: &Path, dry_run: bool, include_subdirs: bool) -> Result<()> {
     let source = source
         .canonicalize()
         .with_context(|| format!("source does not exist: {}", source.display()))?;
@@ -655,7 +655,15 @@ fn validate_paths(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
         bail!("source and dest must be different directories");
     }
 
-    if source.starts_with(&dest) || dest.starts_with(&source) {
+    // When include_subdirs is false, only top-level regular files are mirrored
+    // and the source walk never descends into subdirectories, so a dest nested
+    // inside source cannot be read back as source content (no copy loop).
+    // The reverse (source nested inside dest) is still unsafe: the dest deletion
+    // walk would see the source directory as a stray entry, so keep rejecting it.
+    let dest_under_source = dest.starts_with(&source);
+    let source_under_dest = source.starts_with(&dest);
+
+    if source_under_dest || (dest_under_source && include_subdirs) {
         bail!("source and dest must not be nested");
     }
 
