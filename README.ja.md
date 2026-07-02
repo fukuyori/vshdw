@@ -81,10 +81,12 @@ vshdw --config default.toml
 
 ```toml
 [defaults]
+dest_root = "E:\\Backup"
 trash = true
 no_delete = false
 suppress_warnings = false
 low_priority = false
+use_gitignore = true
 include_subdirs = true
 include_files = []
 include_file_patterns = []
@@ -99,19 +101,19 @@ max_size_bytes = 1073741824
 [[jobs]]
 name = "documents"
 source = "D:\\Data"
-dest = "E:\\Backup\\Data"
+dest = "Data"
 
 [[jobs]]
 name = "projects"
 sources = ["D:\\Projects", "D:\\Labs"]
-dest = "E:\\Backup\\Projects"
+dest_subdir = "Projects"
 exclude_dirs = ["target", "dist"]
 exclude_extensions = ["tmp"]
 ```
 
 ### defaults
 
-`[defaults]` は省略可能である。ここに書いた値はすべての `[[jobs]]` に適用される。ジョブ側にも同じ種類の設定を書いた場合、`include_*`、`exclude_*` と各 `*_patterns` は defaults と job の内容を結合し、`trash`、`no_delete`、`suppress_warnings`、`low_priority`、`include_subdirs`、`max_size_bytes` は job 側の値を優先する。
+`[defaults]` は省略可能である。ここに書いた値はすべての `[[jobs]]` に適用される。ジョブ側にも同じ種類の設定を書いた場合、`include_*`、`exclude_*` と各 `*_patterns` は defaults と job の内容を結合し、`trash`、`no_delete`、`suppress_warnings`、`low_priority`、`use_gitignore`、`include_subdirs`、`max_size_bytes` は job 側の値を優先する。
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -119,7 +121,9 @@ exclude_extensions = ["tmp"]
 | `no_delete` | boolean | `false` | バックアップ先だけに存在するファイルやディレクトリを削除しない。 |
 | `suppress_warnings` | boolean | `false` | 権限不足などで読み取れないパスをスキップしたときの `warning:` 表示を抑制する。スキップ処理と削除保護は通常どおり行う。 |
 | `low_priority` | boolean | `false` | vshdw プロセスの実行優先度を下げる。macOS/Linux では nice 値、Windows ではプロセス優先度クラスを使う。 |
+| `use_gitignore` | boolean | `false` | source 配下の各 `.gitignore` を読み、マッチしたファイルやディレクトリを同期対象から外す。 |
 | `include_subdirs` | boolean | `true` | サブディレクトリを同期対象に含める。`false` の場合は `source` 直下のファイルだけを対象にする。 |
+| `dest_root` | string | unset | バックアップ先の共通ルート。これを指定すると、相対 `dest` と `dest_subdir` はこの配下のパスとして扱う。 |
 | `include_files` | string array | `[]` | 同期対象に含めるファイル。正規表現ではなく、ファイル名、相対パス、または絶対パスで指定する。空の場合はすべてのファイルを対象にする。 |
 | `include_file_patterns` | string array | `[]` | 同期対象に含めるファイルの正規表現。ファイル名、相対パス、絶対パスに対して判定する。 |
 | `exclude_dirs` | string array | `[]` | 同期対象から外すディレクトリ。正規表現ではなく、ディレクトリ名、`source` から見た相対パス、または絶対パスで指定する。 |
@@ -170,11 +174,13 @@ no_delete = true
 | `name` | string | no | ログ表示用の名前。省略時は `job-1`、`job-2` のように自動設定される。 |
 | `source` | string | `source` または `sources` のどちらかが必要 | マスター側ディレクトリ。vshdw はこの内容を正とする。 |
 | `sources` | string array | `source` または `sources` のどちらかが必要 | 複数のマスター側ディレクトリ。各 source は `dest/<sourceディレクトリ名>/` に展開して同期される。 |
-| `dest` | string | yes | バックアップ先ディレクトリ。source と同じ状態に揃えられる。 |
+| `dest` | string | `dest` または `dest_subdir` のどちらかが必要 | バックアップ先ディレクトリ。絶対パスの場合はそのまま使う。相対パスの場合、`defaults.dest_root` があればその配下、なければ設定ファイルのあるディレクトリからの相対パスとして扱う。 |
+| `dest_subdir` | string | `dest` または `dest_subdir` のどちらかが必要 | `defaults.dest_root` 配下のサブディレクトリ。`dest` と同時には指定できない。 |
 | `trash` | boolean | no | この job だけ `trash` の設定を上書きする。 |
 | `no_delete` | boolean | no | この job だけ `no_delete` の設定を上書きする。 |
 | `suppress_warnings` | boolean | no | この job だけ警告表示の抑制設定を上書きする。 |
 | `low_priority` | boolean | no | この job の実行前に vshdw プロセスの実行優先度を下げる。 |
+| `use_gitignore` | boolean | no | この job だけ `.gitignore` の使用有無を上書きする。 |
 | `include_subdirs` | boolean | no | この job だけサブディレクトリを含めるかどうかを上書きする。 |
 | `include_files` | string array | no | この job に追加する対象ファイル。正規表現なしで指定し、defaults の値と結合される。 |
 | `include_file_patterns` | string array | no | この job に追加する対象ファイル正規表現。defaults の値と結合される。 |
@@ -223,9 +229,9 @@ dest = "/Volumes/Backup/Application Support"
 low_priority = true
 ```
 
-設定ファイル内の相対 `source` / `dest` は、設定ファイルが置かれているディレクトリからの相対パスとして解釈される。`exclude_dirs` に `node_modules` のようなディレクトリ名だけを書いた場合は、source 配下のどの階層にある同名ディレクトリにも適用される。`foo/bar` のような相対パスを書いた場合は、`source` から見た相対ディレクトリとして扱う。絶対パスを書いた場合は、そのパス自体を除外する。絶対パスが `source` 配下にある場合は、対応する相対パスも除外扱いになるため、バックアップ先の同じ位置にあるディレクトリも削除対象から外れる。
+設定ファイル内の相対 `source` と、`defaults.dest_root` がない場合の相対 `dest` は、設定ファイルが置かれているディレクトリからの相対パスとして解釈される。`defaults.dest_root` を指定した場合、相対 `dest` と `dest_subdir` はその配下のパスとして扱う。絶対 `dest` は `defaults.dest_root` があってもそのまま使う。`exclude_dirs` に `node_modules` のようなディレクトリ名だけを書いた場合は、source 配下のどの階層にある同名ディレクトリにも適用される。`foo/bar` のような相対パスを書いた場合は、`source` から見た相対ディレクトリとして扱う。絶対パスを書いた場合は、そのパス自体を除外する。絶対パスが `source` 配下にある場合は、対応する相対パスも除外扱いになるため、バックアップ先の同じ位置にあるディレクトリも削除対象から外れる。
 
-除外されたファイルやディレクトリはコピーされず、バックアップ先に存在していても削除対象から外される。例えば `exclude_extensions = ["log"]` の場合、`source` 側の `.log` ファイルはコピーされず、`dest` 側に既にある `.log` ファイルも削除されない。
+除外されたファイルやディレクトリはコピーされず、バックアップ先に存在していても削除対象から外される。例えば `exclude_extensions = ["log"]` の場合、`source` 側の `.log` ファイルはコピーされず、`dest` 側に既にある `.log` ファイルも削除されない。`use_gitignore = true` の場合、`.gitignore` にマッチしたファイルやディレクトリも同じようにコピー対象と削除対象から外される。
 
 正規表現は Rust の `regex` 構文で指定し、`include_file_patterns`、`exclude_dir_patterns`、`exclude_file_patterns`、`exclude_extension_patterns` だけで使う。TOML では `'\.cache'` のような single-quoted literal string を使うと、バックスラッシュを二重に書かずに済む。`exclude_dir_patterns` は相対パスと絶対パスの両方に対して判定する。`include_file_patterns` と `exclude_file_patterns` はファイル名、相対パス、絶対パスに対して判定する。判定時には同じパスを `/` 区切り、`\` 区切り、`¥` 区切りの候補として扱うため、Windows と macOS/Linux の区切り文字の違いを吸収できる。`exclude_extension_patterns` は `tar.gz` 全体ではなく、最後の拡張子 `gz` のような拡張子部分だけに対して判定する。無効な正規表現がある場合、vshdw は起動時にエラーを返す。
 
@@ -278,7 +284,9 @@ dest = "/Volumes/Backup/Documents"
 
 ```toml
 [defaults]
+dest_root = "/Volumes/Backup"
 trash = true
+use_gitignore = true
 include_subdirs = true
 include_files = []
 include_file_patterns = []
@@ -293,12 +301,12 @@ max_size_bytes = 1073741824
 [[jobs]]
 name = "documents"
 source = "/Users/me/Documents"
-dest = "/Volumes/Backup/Documents"
+dest = "Documents"
 
 [[jobs]]
 name = "projects"
 sources = ["/Users/me/Projects", "/Users/me/Labs"]
-dest = "/Volumes/Backup/Projects"
+dest_subdir = "Projects"
 exclude_dirs = ["dist", "build"]
 ```
 
@@ -372,6 +380,12 @@ vshdw --config default.toml --no-progress
 
 ```bash
 vshdw --config default.toml --low-priority
+```
+
+source 配下の `.gitignore` を使いたい場合は `--use-gitignore` を指定する。設定ファイル実行時に指定すると、すべての job で `.gitignore` が有効になる。
+
+```bash
+vshdw --config default.toml --use-gitignore
 ```
 
 ## Comparison

@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::{CommandFactory, Parser};
 use filetime::{FileTime, set_file_mtime};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use serde::Deserialize;
@@ -52,6 +53,10 @@ struct Args {
     /// Lower the process priority while mirroring.
     #[arg(long)]
     low_priority: bool,
+
+    /// Honor .gitignore files found under the source directory.
+    #[arg(long)]
+    use_gitignore: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +68,7 @@ struct ConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct ConfigDefaults {
+    dest_root: Option<PathBuf>,
     #[serde(default)]
     trash: bool,
     #[serde(default)]
@@ -71,6 +77,8 @@ struct ConfigDefaults {
     suppress_warnings: bool,
     #[serde(default)]
     low_priority: bool,
+    #[serde(default)]
+    use_gitignore: bool,
     include_subdirs: Option<bool>,
     #[serde(default)]
     dirs: Vec<PathBuf>,
@@ -109,7 +117,8 @@ struct JobConfig {
     source: Option<PathBuf>,
     #[serde(default)]
     sources: Vec<PathBuf>,
-    dest: PathBuf,
+    dest: Option<PathBuf>,
+    dest_subdir: Option<PathBuf>,
     #[serde(default)]
     trash: Option<bool>,
     #[serde(default)]
@@ -118,6 +127,8 @@ struct JobConfig {
     suppress_warnings: Option<bool>,
     #[serde(default)]
     low_priority: Option<bool>,
+    #[serde(default)]
+    use_gitignore: Option<bool>,
     #[serde(default)]
     include_subdirs: Option<bool>,
     #[serde(default)]
@@ -175,6 +186,18 @@ struct Filters {
     exclude_extensions: HashSet<String>,
     exclude_extension_patterns: Vec<Regex>,
     max_size_bytes: Option<u64>,
+    gitignore: GitignoreRules,
+}
+
+#[derive(Debug, Default)]
+struct GitignoreRules {
+    files: Vec<GitignoreFile>,
+}
+
+#[derive(Debug)]
+struct GitignoreFile {
+    base: PathBuf,
+    matcher: Gitignore,
 }
 
 #[derive(Debug, Default)]
@@ -294,6 +317,8 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
                 .unwrap_or(config.defaults.suppress_warnings);
             let low_priority =
                 args.low_priority || job.low_priority.unwrap_or(config.defaults.low_priority);
+            let use_gitignore =
+                args.use_gitignore || job.use_gitignore.unwrap_or(config.defaults.use_gitignore);
             let include_subdirs = job
                 .include_subdirs
                 .or(config.defaults.include_subdirs)
@@ -306,7 +331,13 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
             }
 
             let sources = resolve_sources(config_dir, &name, job.source, job.sources)?;
-            let dest = resolve_from(config_dir, job.dest);
+            let dest = resolve_dest(
+                config_dir,
+                &name,
+                config.defaults.dest_root.as_deref(),
+                job.dest,
+                job.dest_subdir,
+            )?;
             let exclude_dir_patterns = compile_patterns(
                 &exclude_dir_patterns,
                 &format!("job {name} exclude_dir_patterns"),
@@ -326,6 +357,11 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
 
             for source in &sources {
                 let source_name = source_dir_name(source)?;
+                let gitignore = if use_gitignore {
+                    build_gitignore(source, &name)?
+                } else {
+                    GitignoreRules::default()
+                };
                 let expanded_dest = if sources.len() == 1 {
                     dest.clone()
                 } else {
@@ -356,6 +392,7 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
                         exclude_extensions: normalize_extensions(exclude_extensions.clone()),
                         exclude_extension_patterns: exclude_extension_patterns.clone(),
                         max_size_bytes: job.max_size_bytes.or(config.defaults.max_size_bytes),
+                        gitignore,
                     },
                 });
             }
@@ -375,6 +412,15 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
         .clone()
         .context("--dest is required when --config is not specified")?;
 
+    let filters = Filters {
+        gitignore: if args.use_gitignore {
+            build_gitignore(&source, "cli")?
+        } else {
+            GitignoreRules::default()
+        },
+        ..Filters::default()
+    };
+
     Ok(vec![Job {
         name: "default".to_string(),
         source,
@@ -384,7 +430,7 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
         suppress_warnings: false,
         low_priority: args.low_priority,
         include_subdirs: true,
-        filters: Filters::default(),
+        filters,
     }])
 }
 
@@ -455,6 +501,41 @@ fn resolve_from(base: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
+fn resolve_dest(
+    base: &Path,
+    job_name: &str,
+    dest_root: Option<&Path>,
+    dest: Option<PathBuf>,
+    dest_subdir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if dest.is_some() && dest_subdir.is_some() {
+        bail!("job {job_name} must specify either dest or dest_subdir, not both");
+    }
+
+    let dest_root = dest_root.map(|root| resolve_from(base, root.to_path_buf()));
+
+    if let Some(subdir) = dest_subdir {
+        if subdir.is_absolute() {
+            bail!("job {job_name} dest_subdir must be a relative path");
+        }
+
+        let root = dest_root.as_ref().with_context(|| {
+            format!("job {job_name} uses dest_subdir but defaults.dest_root is not set")
+        })?;
+        return Ok(root.join(subdir));
+    }
+
+    let dest = dest.with_context(|| format!("job {job_name} must specify dest or dest_subdir"))?;
+
+    if dest.is_absolute() {
+        Ok(dest)
+    } else if let Some(root) = dest_root {
+        Ok(root.join(dest))
+    } else {
+        Ok(base.join(dest))
+    }
+}
+
 fn resolve_sources(
     base: &Path,
     job_name: &str,
@@ -484,6 +565,47 @@ fn source_dir_name(source: &Path) -> Result<&std::ffi::OsStr> {
         .file_name()
         .filter(|name| !name.is_empty())
         .with_context(|| format!("source has no directory name: {}", source.display()))
+}
+
+fn build_gitignore(source: &Path, job_name: &str) -> Result<GitignoreRules> {
+    let mut rules = GitignoreRules::default();
+
+    if source.is_dir() {
+        for entry in WalkDir::new(source).follow_links(false) {
+            let entry = entry
+                .with_context(|| format!("failed to scan .gitignore files for job {job_name}"))?;
+
+            if entry.file_type().is_file() && entry.file_name() == ".gitignore" {
+                let base = entry.path().parent().unwrap_or(source);
+                let mut builder = GitignoreBuilder::new(base);
+
+                if let Some(err) = builder.add(entry.path()) {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "failed to read .gitignore for job {job_name}: {}",
+                            entry.path().display()
+                        )
+                    });
+                }
+
+                let matcher = builder.build().with_context(|| {
+                    format!(
+                        "failed to compile .gitignore rules for job {job_name}: {}",
+                        entry.path().display()
+                    )
+                })?;
+                let base = relative_path(base, source)?;
+
+                rules.files.push(GitignoreFile { base, matcher });
+            }
+        }
+    }
+
+    rules
+        .files
+        .sort_by_key(|file| file.base.components().count());
+
+    Ok(rules)
 }
 
 fn compile_patterns(patterns: &[String], label: &str) -> Result<Vec<Regex>> {
@@ -921,6 +1043,7 @@ impl Filters {
             .iter()
             .any(|dir| relative_dir_matches(rel, dir))
             || self.matches_dir_pattern(rel)
+            || self.matches_gitignore(rel, true)
             || absolute_path(path)
                 .map(normalize_path)
                 .ok()
@@ -938,6 +1061,7 @@ impl Filters {
             || !self.includes_file(rel, path)
             || self.matches_exclude_file(rel, path)
             || self.matches_file_pattern(rel, path)
+            || self.matches_gitignore(rel, false)
             || self.excludes_extension(path)
         {
             return Ok(true);
@@ -966,6 +1090,7 @@ impl Filters {
                 && (!self.includes_file(rel, path)
                     || self.matches_exclude_file(rel, path)
                     || self.matches_file_pattern(rel, path)
+                    || self.matches_gitignore(rel, false)
                     || self.excludes_extension(path)))
         {
             return Ok(true);
@@ -1010,6 +1135,42 @@ impl Filters {
         }
 
         path_matches_patterns(&self.exclude_dir_patterns, path)
+    }
+
+    fn matches_gitignore(&self, rel: &Path, is_dir: bool) -> bool {
+        if !is_dir && self.gitignore_ignored_ancestor(rel) {
+            return true;
+        }
+
+        let mut ignored = false;
+
+        for file in &self.gitignore.files {
+            let matched_path = if file.base.as_os_str().is_empty() {
+                Some(rel)
+            } else {
+                rel.strip_prefix(&file.base).ok()
+            };
+
+            let Some(matched_path) = matched_path else {
+                continue;
+            };
+
+            let matched = file.matcher.matched(matched_path, is_dir);
+            if matched.is_ignore() {
+                ignored = true;
+            } else if matched.is_whitelist() {
+                ignored = false;
+            }
+        }
+
+        ignored
+    }
+
+    fn gitignore_ignored_ancestor(&self, rel: &Path) -> bool {
+        rel.ancestors()
+            .skip(1)
+            .filter(|ancestor| !ancestor.as_os_str().is_empty())
+            .any(|ancestor| self.matches_gitignore(ancestor, true))
     }
 
     fn matches_file_pattern(&self, rel: &Path, path: &Path) -> bool {
@@ -1431,5 +1592,148 @@ mod tests {
             Path::new("project/foo/bar"),
             Path::new("foo/bar")
         ));
+    }
+
+    #[test]
+    fn relative_dest_uses_config_dir_without_dest_root() {
+        let dest = resolve_dest(
+            Path::new("/configs/vshdw"),
+            "docs",
+            None,
+            Some(PathBuf::from("Documents")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(dest, PathBuf::from("/configs/vshdw/Documents"));
+    }
+
+    #[test]
+    fn relative_dest_uses_dest_root_when_set() {
+        let dest = resolve_dest(
+            Path::new("/configs/vshdw"),
+            "docs",
+            Some(Path::new("/Volumes/Backup")),
+            Some(PathBuf::from("Documents")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(dest, PathBuf::from("/Volumes/Backup/Documents"));
+    }
+
+    #[test]
+    fn absolute_dest_overrides_dest_root() {
+        let dest = resolve_dest(
+            Path::new("/configs/vshdw"),
+            "docs",
+            Some(Path::new("/Volumes/Backup")),
+            Some(PathBuf::from("/Other/Backup/Documents")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(dest, PathBuf::from("/Other/Backup/Documents"));
+    }
+
+    #[test]
+    fn dest_subdir_requires_dest_root() {
+        let err = resolve_dest(
+            Path::new("/configs/vshdw"),
+            "docs",
+            None,
+            None,
+            Some(PathBuf::from("Documents")),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("job docs uses dest_subdir but defaults.dest_root is not set")
+        );
+    }
+
+    #[test]
+    fn gitignore_excludes_root_rules() {
+        let root = test_temp_dir("gitignore-root");
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n!important.log\n").unwrap();
+
+        let filters = Filters {
+            gitignore: build_gitignore(&root, "test").unwrap(),
+            ..Filters::default()
+        };
+
+        assert!(filters.excludes_dir(Path::new("target"), &root.join("target")));
+        assert!(
+            filters
+                .excludes_file(Path::new("debug.log"), &root.join("debug.log"))
+                .unwrap()
+        );
+        assert!(
+            !filters
+                .excludes_file(Path::new("important.log"), &root.join("important.log"))
+                .unwrap()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gitignore_excludes_nested_rules_from_their_directory() {
+        let root = test_temp_dir("gitignore-nested");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/.gitignore"), "*.tmp\n").unwrap();
+
+        let filters = Filters {
+            gitignore: build_gitignore(&root, "test").unwrap(),
+            ..Filters::default()
+        };
+
+        assert!(
+            filters
+                .excludes_file(Path::new("src/cache.tmp"), &root.join("src/cache.tmp"))
+                .unwrap()
+        );
+        assert!(
+            !filters
+                .excludes_file(Path::new("cache.tmp"), &root.join("cache.tmp"))
+                .unwrap()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gitignore_ignored_parent_keeps_children_ignored() {
+        let root = test_temp_dir("gitignore-parent");
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join("target/.gitignore"), "!keep.log\n").unwrap();
+
+        let filters = Filters {
+            gitignore: build_gitignore(&root, "test").unwrap(),
+            ..Filters::default()
+        };
+
+        assert!(
+            filters
+                .excludes_file(Path::new("target/keep.log"), &root.join("target/keep.log"))
+                .unwrap()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("vshdw-{name}-{}-{nanos}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 }

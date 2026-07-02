@@ -81,10 +81,12 @@ vshdw --config default.toml
 
 ```toml
 [defaults]
+dest_root = "E:\\Backup"
 trash = true
 no_delete = false
 suppress_warnings = false
 low_priority = false
+use_gitignore = true
 include_subdirs = true
 include_files = []
 include_file_patterns = []
@@ -99,19 +101,19 @@ max_size_bytes = 1073741824
 [[jobs]]
 name = "documents"
 source = "D:\\Data"
-dest = "E:\\Backup\\Data"
+dest = "Data"
 
 [[jobs]]
 name = "projects"
 sources = ["D:\\Projects", "D:\\Labs"]
-dest = "E:\\Backup\\Projects"
+dest_subdir = "Projects"
 exclude_dirs = ["target", "dist"]
 exclude_extensions = ["tmp"]
 ```
 
 ### defaults
 
-`[defaults]` is optional. Values written here are applied to all `[[jobs]]`. When the same kind of setting also appears in a job, `include_*`, `exclude_*`, and `*_patterns` values are merged, while `trash`, `no_delete`, `suppress_warnings`, `low_priority`, `include_subdirs`, and `max_size_bytes` are overridden by the job value.
+`[defaults]` is optional. Values written here are applied to all `[[jobs]]`. When the same kind of setting also appears in a job, `include_*`, `exclude_*`, and `*_patterns` values are merged, while `trash`, `no_delete`, `suppress_warnings`, `low_priority`, `use_gitignore`, `include_subdirs`, and `max_size_bytes` are overridden by the job value.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -119,7 +121,9 @@ exclude_extensions = ["tmp"]
 | `no_delete` | boolean | `false` | Do not delete files or directories that exist only in the destination. |
 | `suppress_warnings` | boolean | `false` | Suppress `warning:` messages for unreadable skipped paths. Skipping and deletion protection still happen normally. |
 | `low_priority` | boolean | `false` | Lower the vshdw process priority. macOS/Linux use a nice value; Windows uses a process priority class. |
+| `use_gitignore` | boolean | `false` | Read `.gitignore` files under the source and exclude matching files and directories from mirroring. |
 | `include_subdirs` | boolean | `true` | Include subdirectories. If `false`, only direct files under `source` are mirrored. |
+| `dest_root` | string | unset | Common destination root. When set, relative `dest` and `dest_subdir` values are resolved under this directory. |
 | `include_files` | string array | `[]` | Files to include. Values are literal filenames, relative paths, or absolute paths, not regular expressions. Empty means include all files. |
 | `include_file_patterns` | string array | `[]` | Regular expressions for files to include. They are tested against filenames, relative paths, and absolute paths. |
 | `exclude_dirs` | string array | `[]` | Directories to exclude. Values are literal directory names, paths relative to `source`, or absolute paths, not regular expressions. |
@@ -170,11 +174,13 @@ At least one `[[jobs]]` entry is required. One job describes one source-to-desti
 | `name` | string | no | Name shown in logs. If omitted, vshdw uses `job-1`, `job-2`, and so on. |
 | `source` | string | either `source` or `sources` | Master directory. vshdw treats this side as authoritative. |
 | `sources` | string array | either `source` or `sources` | Multiple master directories. Each source is mirrored into `dest/<source-directory-name>/`. |
-| `dest` | string | yes | Backup destination directory. It is aligned to the source state. |
+| `dest` | string | either `dest` or `dest_subdir` | Backup destination directory. Absolute paths are used as-is. Relative paths are resolved under `defaults.dest_root` when it is set, or relative to the config file directory otherwise. |
+| `dest_subdir` | string | either `dest` or `dest_subdir` | Subdirectory under `defaults.dest_root`. It cannot be used together with `dest`. |
 | `trash` | boolean | no | Override `trash` for this job. |
 | `no_delete` | boolean | no | Override `no_delete` for this job. |
 | `suppress_warnings` | boolean | no | Override warning suppression for this job. |
 | `low_priority` | boolean | no | Lower the vshdw process priority before this job runs. |
+| `use_gitignore` | boolean | no | Override whether this job honors `.gitignore` files. |
 | `include_subdirs` | boolean | no | Override whether subdirectories are included for this job. |
 | `include_files` | string array | no | Add literal files to include for this job. Merged with defaults. |
 | `include_file_patterns` | string array | no | Add include-file regular expressions for this job. Merged with defaults. |
@@ -223,9 +229,9 @@ Set `low_priority = true` to lower process priority. This can make copy work les
 low_priority = true
 ```
 
-Relative `source` and `dest` values inside a config file are resolved relative to the directory that contains the config file. If `exclude_dirs` contains only a directory name such as `node_modules`, it applies to matching directories at any depth under the source. If it contains a relative path such as `foo/bar`, it is treated as a path relative to `source`. If it contains an absolute path, that path itself is excluded. If the absolute path is under `source`, the corresponding relative path is also excluded so the matching destination path is protected from deletion.
+Relative `source` values, and relative `dest` values when `defaults.dest_root` is not set, are resolved relative to the directory that contains the config file. When `defaults.dest_root` is set, relative `dest` and `dest_subdir` values are resolved under that root. Absolute `dest` values are used as-is even when `defaults.dest_root` is set. If `exclude_dirs` contains only a directory name such as `node_modules`, it applies to matching directories at any depth under the source. If it contains a relative path such as `foo/bar`, it is treated as a path relative to `source`. If it contains an absolute path, that path itself is excluded. If the absolute path is under `source`, the corresponding relative path is also excluded so the matching destination path is protected from deletion.
 
-Excluded files and directories are not copied. If they already exist in the destination, they are also excluded from deletion. For example, with `exclude_extensions = ["log"]`, `.log` files on the source side are not copied, and existing `.log` files on the destination side are not deleted.
+Excluded files and directories are not copied. If they already exist in the destination, they are also excluded from deletion. For example, with `exclude_extensions = ["log"]`, `.log` files on the source side are not copied, and existing `.log` files on the destination side are not deleted. When `use_gitignore = true`, files and directories matched by `.gitignore` are excluded from both copying and deletion in the same way.
 
 Regular expressions use Rust's `regex` syntax and are supported only by `include_file_patterns`, `exclude_dir_patterns`, `exclude_file_patterns`, and `exclude_extension_patterns`. In TOML, single-quoted literal strings such as `'\.cache'` avoid double escaping backslashes. `exclude_dir_patterns` are tested against both relative and absolute paths. `include_file_patterns` and `exclude_file_patterns` are tested against filenames, relative paths, and absolute paths. During matching, vshdw tests path variants using `/`, `\`, and `¥` separators to absorb Windows and macOS/Linux separator differences. `exclude_extension_patterns` are tested against only the final extension, such as `gz`, not the whole suffix `tar.gz`. Invalid regular expressions cause startup errors.
 
@@ -278,7 +284,9 @@ Multiple directories with common exclusions:
 
 ```toml
 [defaults]
+dest_root = "/Volumes/Backup"
 trash = true
+use_gitignore = true
 include_subdirs = true
 include_files = []
 include_file_patterns = []
@@ -293,12 +301,12 @@ max_size_bytes = 1073741824
 [[jobs]]
 name = "documents"
 source = "/Users/me/Documents"
-dest = "/Volumes/Backup/Documents"
+dest = "Documents"
 
 [[jobs]]
 name = "projects"
 sources = ["/Users/me/Projects", "/Users/me/Labs"]
-dest = "/Volumes/Backup/Projects"
+dest_subdir = "Projects"
 exclude_dirs = ["dist", "build"]
 ```
 
@@ -372,6 +380,12 @@ Pass `--low-priority` to lower process priority for a one-off run.
 
 ```bash
 vshdw --config default.toml --low-priority
+```
+
+Pass `--use-gitignore` to honor `.gitignore` files under each source. With `--config`, this enables `.gitignore` handling for every job.
+
+```bash
+vshdw --config default.toml --use-gitignore
 ```
 
 ## Comparison

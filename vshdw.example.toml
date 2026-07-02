@@ -1,8 +1,10 @@
 [defaults]
+dest_root = "E:\\Backup"
 trash = true
 no_delete = false
 suppress_warnings = false
 low_priority = false
+use_gitignore = true
 include_subdirs = true
 include_files = []
 include_file_patterns = []
@@ -17,11 +19,11 @@ max_size_bytes = 1073741824
 [[jobs]]
 name = "data"
 source = "D:\\Data"
-dest = "E:\\Backup\\Data"
+dest = "Data"
 
 [[jobs]]
 name = "projects"
 sources = ["D:\\Projects", "D:\\Labs"]
-dest = "E:\\Backup\\Projects"
+dest_subdir = "Projects"
 exclude_dirs = ["target", "dist"]
 exclude_extensions = ["tmp"]
