@@ -233,6 +233,8 @@ Relative `source` values, and relative `dest` values when `defaults.dest_root` i
 
 Excluded files and directories are not copied. If they already exist in the destination, they are also excluded from deletion. For example, with `exclude_extensions = ["log"]`, `.log` files on the source side are not copied, and existing `.log` files on the destination side are not deleted. When `use_gitignore = true`, files and directories matched by `.gitignore` are excluded from both copying and deletion in the same way.
 
+Files that explicitly match `include_files` or `include_file_patterns` take priority over `exclude_dirs`, `exclude_files`, `exclude_extensions`, and `.gitignore`. Even inside an excluded directory, a file is copied when it matches an include rule. `max_size_bytes` still applies as an upper limit.
+
 Regular expressions use Rust's `regex` syntax and are supported only by `include_file_patterns`, `exclude_dir_patterns`, `exclude_file_patterns`, and `exclude_extension_patterns`. In TOML, single-quoted literal strings such as `'\.cache'` avoid double escaping backslashes. `exclude_dir_patterns` are tested against both relative and absolute paths. `include_file_patterns` and `exclude_file_patterns` are tested against filenames, relative paths, and absolute paths. During matching, vshdw tests path variants using `/`, `\`, and `¥` separators to absorb Windows and macOS/Linux separator differences. `exclude_extension_patterns` are tested against only the final extension, such as `gz`, not the whole suffix `tar.gz`. Invalid regular expressions cause startup errors.
 
 For normal path strings, Windows uses `\`, and macOS/Linux use `/`. In TOML double-quoted strings, Windows backslashes must be escaped as `\\`.

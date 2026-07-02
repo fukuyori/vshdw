@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Component, Path, PathBuf},
+    process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
@@ -223,7 +224,17 @@ struct Summary {
     skipped: usize,
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            print_error(&err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     if std::env::args_os().len() == 1 {
         Args::command().print_help()?;
         println!();
@@ -249,6 +260,40 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn print_error(err: &anyhow::Error) {
+    eprintln!("error: {err}");
+
+    let causes: Vec<_> = err.chain().skip(1).collect();
+    if !causes.is_empty() {
+        eprintln!();
+        eprintln!("caused by:");
+        for (index, cause) in causes.iter().enumerate() {
+            eprintln!("  {}: {cause}", index + 1);
+        }
+    }
+
+    if let Some(hint) = error_hint(err) {
+        eprintln!();
+        eprintln!("hint: {hint}");
+    }
+}
+
+fn error_hint(err: &anyhow::Error) -> Option<&'static str> {
+    let io_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())?;
+
+    match io_error.kind() {
+        io::ErrorKind::NotFound => Some(
+            "a path did not exist when vshdw used it. If the source is live application data, retrying may be enough; use --no-progress to print the operation being processed.",
+        ),
+        io::ErrorKind::PermissionDenied => Some(
+            "vshdw did not have permission to read or write that path. Add an exclude rule, close the app that owns it, or grant the terminal/app Full Disk Access on macOS.",
+        ),
+        _ => None,
+    }
 }
 
 fn load_jobs(args: &Args) -> Result<Vec<Job>> {
@@ -385,7 +430,7 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
                     filters: Filters {
                         exclude_dirs: normalize_exclude_dirs(source, exclude_dirs.clone())?,
                         exclude_dir_patterns: exclude_dir_patterns.clone(),
-                        include_files: normalize_paths(include_files.clone()),
+                        include_files: normalize_include_files(source, include_files.clone())?,
                         exclude_files: normalize_paths(exclude_files.clone()),
                         include_file_patterns: include_file_patterns.clone(),
                         exclude_file_patterns: exclude_file_patterns.clone(),
@@ -654,6 +699,29 @@ fn normalize_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .collect()
 }
 
+fn normalize_include_files(source: &Path, files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let source = normalize_path(absolute_path(source)?);
+    let mut normalized = Vec::new();
+
+    for file in files {
+        let file = normalize_path(file);
+        if file.as_os_str().is_empty() {
+            continue;
+        }
+
+        if file.is_absolute()
+            && let Ok(rel) = file.strip_prefix(&source)
+            && !rel.as_os_str().is_empty()
+        {
+            normalized.push(normalize_path(rel.to_path_buf()));
+        }
+
+        normalized.push(file);
+    }
+
+    Ok(normalized)
+}
+
 fn normalize_extensions(extensions: Vec<String>) -> HashSet<String> {
     extensions
         .into_iter()
@@ -673,7 +741,14 @@ fn mirror(job: &Job, args: &Args) -> Result<Summary> {
         job.dest.display()
     );
 
-    let (plan, skipped) = build_plan(job)?;
+    let (plan, skipped) = build_plan(job).with_context(|| {
+        format!(
+            "failed to build plan for job {} ({} -> {})",
+            job.name,
+            job.source.display(),
+            job.dest.display()
+        )
+    })?;
     let mut summary = Summary {
         skipped,
         ..Summary::default()
@@ -683,6 +758,7 @@ fn mirror(job: &Job, args: &Args) -> Result<Summary> {
     let progress = progress_bar(plan.len(), args.no_progress || args.dry_run);
 
     for operation in plan {
+        let operation_description = operation.description();
         progress.set_message(operation.progress_message());
         execute_operation(
             operation,
@@ -690,7 +766,15 @@ fn mirror(job: &Job, args: &Args) -> Result<Summary> {
             show_operations,
             job.suppress_warnings,
             &mut summary,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "failed to {operation_description} for job {} ({} -> {})",
+                job.name,
+                job.source.display(),
+                job.dest.display()
+            )
+        })?;
         progress.inc(1);
     }
 
@@ -995,7 +1079,9 @@ fn should_descend(
         return false;
     }
 
-    !entry.file_type().is_dir() || !filters.excludes_dir(rel, path)
+    !entry.file_type().is_dir()
+        || !filters.excludes_dir(rel, path)
+        || filters.may_contain_included_file(rel)
 }
 
 fn warn_walk_error(kind: &str, root: &Path, err: &walkdir::Error) {
@@ -1057,8 +1143,12 @@ impl Filters {
     }
 
     fn excludes_file(&self, rel: &Path, path: &Path) -> Result<bool> {
-        if self.excludes_dir(rel, path)
-            || !self.includes_file(rel, path)
+        if self.explicitly_includes_file(rel, path) {
+            return self.excludes_by_size(path);
+        }
+
+        if !self.includes_file(rel, path)
+            || self.excludes_dir(rel, path)
             || self.matches_exclude_file(rel, path)
             || self.matches_file_pattern(rel, path)
             || self.matches_gitignore(rel, false)
@@ -1067,38 +1157,35 @@ impl Filters {
             return Ok(true);
         }
 
-        if let Some(limit) = self.max_size_bytes {
-            let size = match path.metadata() {
-                Ok(meta) => meta.len(),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(true),
-                Err(err) => {
-                    return Err(err)
-                        .with_context(|| format!("failed to read metadata: {}", path.display()));
-                }
-            };
-            if size > limit {
-                return Ok(true);
-            }
+        self.excludes_by_size(path)
+    }
+
+    fn excludes_dest_path(&self, rel: &Path, path: &Path) -> Result<bool> {
+        if path.is_file() && self.explicitly_includes_file(rel, path) {
+            return self.excludes_by_size(path);
+        }
+
+        if (path.is_file()
+            && (!self.includes_file(rel, path)
+                || self.excludes_dir(rel, path)
+                || self.matches_exclude_file(rel, path)
+                || self.matches_file_pattern(rel, path)
+                || self.matches_gitignore(rel, false)
+                || self.excludes_extension(path)))
+            || (!path.is_file() && self.excludes_dir(rel, path))
+        {
+            return Ok(true);
+        }
+
+        if path.is_file() {
+            return self.excludes_by_size(path);
         }
 
         Ok(false)
     }
 
-    fn excludes_dest_path(&self, rel: &Path, path: &Path) -> Result<bool> {
-        if self.excludes_dir(rel, path)
-            || (path.is_file()
-                && (!self.includes_file(rel, path)
-                    || self.matches_exclude_file(rel, path)
-                    || self.matches_file_pattern(rel, path)
-                    || self.matches_gitignore(rel, false)
-                    || self.excludes_extension(path)))
-        {
-            return Ok(true);
-        }
-
-        if path.is_file()
-            && let Some(limit) = self.max_size_bytes
-        {
+    fn excludes_by_size(&self, path: &Path) -> Result<bool> {
+        if let Some(limit) = self.max_size_bytes {
             let size = match path.metadata() {
                 Ok(meta) => meta.len(),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(true),
@@ -1195,7 +1282,19 @@ impl Filters {
             return true;
         }
 
+        self.explicitly_includes_file(rel, path)
+    }
+
+    fn explicitly_includes_file(&self, rel: &Path, path: &Path) -> bool {
         self.matches_include_file(rel, path) || self.matches_include_file_pattern(rel, path)
+    }
+
+    fn may_contain_included_file(&self, rel: &Path) -> bool {
+        self.include_files.iter().any(|file| {
+            !file.is_absolute()
+                && file.components().count() > rel.components().count()
+                && file.starts_with(rel)
+        }) || !self.include_file_patterns.is_empty()
     }
 
     fn matches_include_file(&self, rel: &Path, path: &Path) -> bool {
@@ -1271,6 +1370,19 @@ impl Operation {
             Operation::Trash { .. } => "trash",
         }
     }
+
+    fn description(&self) -> String {
+        match self {
+            Operation::MakeDir { path } => format!("create directory {}", path.display()),
+            Operation::Copy { source, dest } => {
+                format!("copy {} to {}", source.display(), dest.display())
+            }
+            Operation::Delete { path } => format!("delete {}", path.display()),
+            Operation::Trash { path, target } => {
+                format!("move {} to trash at {}", path.display(), target.display())
+            }
+        }
+    }
 }
 
 fn execute_operation(
@@ -1343,7 +1455,10 @@ fn execute_operation(
                 println!("trash: {} -> {}", path.display(), target.display());
             }
             if !dry_run {
-                move_to_trash(&path, &target)?;
+                if !move_to_trash_for_delete(&path, &target, suppress_warnings)? {
+                    summary.skipped += 1;
+                    return Ok(());
+                }
             }
             summary.trashed += 1;
         }
@@ -1365,6 +1480,15 @@ fn warn_skipped_delete(path: &Path, err: &anyhow::Error, suppress_warnings: bool
     if !suppress_warnings {
         eprintln!(
             "warning: skipped destination path that could not be deleted: {}: {err:#}",
+            path.display()
+        );
+    }
+}
+
+fn warn_skipped_trash(path: &Path, err: &anyhow::Error, suppress_warnings: bool) {
+    if !suppress_warnings {
+        eprintln!(
+            "warning: skipped destination path that could not be moved to trash: {}: {err:#}",
             path.display()
         );
     }
@@ -1463,16 +1587,30 @@ fn move_to_trash(path: &Path, target: &Path) -> Result<()> {
             .with_context(|| format!("failed to create trash directory: {}", parent.display()))?;
     }
 
-    fs::rename(path, target).or_else(|_| {
-        if path.is_dir() {
-            copy_dir_all(path, target)?;
-            fs::remove_dir_all(path)?;
-        } else {
-            fs::copy(path, target)?;
-            fs::remove_file(path)?;
+    match fs::rename(path, target) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(err)
+                .with_context(|| format!("failed to move to trash: {}", path.display()));
         }
-        Ok::<_, anyhow::Error>(())
-    })?;
+        Err(_) => {}
+    }
+
+    if path.is_dir() {
+        copy_dir_all(path, target)?;
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove trashed directory: {}", path.display()))?;
+    } else {
+        fs::copy(path, target).with_context(|| {
+            format!(
+                "failed to copy trashed file {} to {}",
+                path.display(),
+                target.display()
+            )
+        })?;
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove trashed file: {}", path.display()))?;
+    }
 
     Ok(())
 }
@@ -1498,11 +1636,7 @@ fn remove_path_for_delete(path: &Path, suppress_warnings: bool) -> Result<bool> 
     match remove_path(path) {
         Ok(()) => Ok(true),
         Err(err) => {
-            if err
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<io::Error>())
-                .is_some_and(|err| err.kind() == io::ErrorKind::NotFound)
-            {
+            if is_not_found_error(&err) {
                 return Ok(false);
             }
 
@@ -1510,6 +1644,26 @@ fn remove_path_for_delete(path: &Path, suppress_warnings: bool) -> Result<bool> 
             Ok(false)
         }
     }
+}
+
+fn move_to_trash_for_delete(path: &Path, target: &Path, suppress_warnings: bool) -> Result<bool> {
+    match move_to_trash(path, target) {
+        Ok(()) => Ok(true),
+        Err(err) => {
+            if is_not_found_error(&err) {
+                return Ok(false);
+            }
+
+            warn_skipped_trash(path, &err, suppress_warnings);
+            Ok(false)
+        }
+    }
+}
+
+fn is_not_found_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+        .is_some_and(|err| err.kind() == io::ErrorKind::NotFound)
 }
 
 fn copy_dir_all(source: &Path, dest: &Path) -> Result<()> {
@@ -1723,6 +1877,118 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn move_to_trash_for_delete_skips_missing_path() {
+        let root = test_temp_dir("trash-missing");
+        let missing = root.join("missing.txt");
+        let target = root.join(".deleted/missing.txt");
+
+        assert!(!move_to_trash_for_delete(&missing, &target, true).unwrap());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn error_hint_mentions_missing_paths_for_not_found() {
+        let err = anyhow::Error::new(io::Error::new(io::ErrorKind::NotFound, "missing"));
+
+        assert!(error_hint(&err).unwrap().contains("a path did not exist"));
+    }
+
+    #[test]
+    fn include_file_overrides_excluded_directory() {
+        let root = test_temp_dir("include-over-exclude-dir");
+        let source = root.join("source");
+        let dest = root.join("dest");
+        fs::create_dir_all(source.join("foo")).unwrap();
+        fs::write(source.join("foo/keep.txt"), "keep").unwrap();
+        fs::write(source.join("foo/drop.txt"), "drop").unwrap();
+
+        let job = test_job(
+            source,
+            dest,
+            Filters {
+                exclude_dirs: ExcludeDirs {
+                    relative: vec![PathBuf::from("foo")],
+                    absolute: Vec::new(),
+                },
+                include_files: vec![PathBuf::from("foo/keep.txt")],
+                ..Filters::default()
+            },
+        );
+        let (plan, _) = build_plan(&job).unwrap();
+
+        assert!(plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("foo/keep.txt"))
+            )
+        }));
+        assert!(!plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("foo/drop.txt"))
+            )
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_file_overrides_gitignored_directory() {
+        let root = test_temp_dir("include-over-gitignore-dir");
+        let source = root.join("source");
+        let dest = root.join("dest");
+        fs::create_dir_all(source.join("foo")).unwrap();
+        fs::write(source.join(".gitignore"), "foo/\n").unwrap();
+        fs::write(source.join("foo/keep.txt"), "keep").unwrap();
+        fs::write(source.join("foo/drop.txt"), "drop").unwrap();
+
+        let job = test_job(
+            source.clone(),
+            dest,
+            Filters {
+                gitignore: build_gitignore(&source, "test").unwrap(),
+                include_files: vec![PathBuf::from("foo/keep.txt")],
+                ..Filters::default()
+            },
+        );
+        let (plan, _) = build_plan(&job).unwrap();
+
+        assert!(plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("foo/keep.txt"))
+            )
+        }));
+        assert!(!plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("foo/drop.txt"))
+            )
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_job(source: PathBuf, dest: PathBuf, filters: Filters) -> Job {
+        Job {
+            name: "test".to_string(),
+            source,
+            dest,
+            trash: false,
+            no_delete: false,
+            suppress_warnings: false,
+            low_priority: false,
+            include_subdirs: true,
+            filters,
+        }
     }
 
     fn test_temp_dir(name: &str) -> PathBuf {

@@ -233,6 +233,8 @@ low_priority = true
 
 除外されたファイルやディレクトリはコピーされず、バックアップ先に存在していても削除対象から外される。例えば `exclude_extensions = ["log"]` の場合、`source` 側の `.log` ファイルはコピーされず、`dest` 側に既にある `.log` ファイルも削除されない。`use_gitignore = true` の場合、`.gitignore` にマッチしたファイルやディレクトリも同じようにコピー対象と削除対象から外される。
 
+`include_files` または `include_file_patterns` に明示一致したファイルは、`exclude_dirs`、`exclude_files`、`exclude_extensions`、`.gitignore` より優先される。除外ディレクトリの内側にあるファイルでも、include に一致すればコピー対象になる。ただし `max_size_bytes` は上限として引き続き適用される。
+
 正規表現は Rust の `regex` 構文で指定し、`include_file_patterns`、`exclude_dir_patterns`、`exclude_file_patterns`、`exclude_extension_patterns` だけで使う。TOML では `'\.cache'` のような single-quoted literal string を使うと、バックスラッシュを二重に書かずに済む。`exclude_dir_patterns` は相対パスと絶対パスの両方に対して判定する。`include_file_patterns` と `exclude_file_patterns` はファイル名、相対パス、絶対パスに対して判定する。判定時には同じパスを `/` 区切り、`\` 区切り、`¥` 区切りの候補として扱うため、Windows と macOS/Linux の区切り文字の違いを吸収できる。`exclude_extension_patterns` は `tar.gz` 全体ではなく、最後の拡張子 `gz` のような拡張子部分だけに対して判定する。無効な正規表現がある場合、vshdw は起動時にエラーを返す。
 
 通常のパス文字列では、Windows は `\`、macOS/Linux は `/` を使う。TOML の double-quoted string で Windows パスを書く場合は `\` を `\\` にする。
