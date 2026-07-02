@@ -51,6 +51,10 @@ struct Args {
     #[arg(long)]
     no_progress: bool,
 
+    /// Print each planned and executed operation.
+    #[arg(short, long)]
+    verbose: bool,
+
     /// Lower the process priority while mirroring.
     #[arg(long)]
     low_priority: bool,
@@ -754,8 +758,8 @@ fn mirror(job: &Job, args: &Args) -> Result<Summary> {
         ..Summary::default()
     };
 
-    let show_operations = args.no_progress || args.dry_run;
-    let progress = progress_bar(plan.len(), args.no_progress || args.dry_run);
+    let show_operations = args.verbose || args.no_progress || args.dry_run;
+    let progress = progress_bar(plan.len(), show_operations);
 
     for operation in plan {
         let operation_description = operation.description();
@@ -899,6 +903,7 @@ fn build_plan(job: &Job) -> Result<(Vec<Operation>, usize)> {
         &mut plan,
         &mut skipped,
     )?;
+    remove_protected_make_dirs(job, &protected_source_paths, &mut plan);
 
     if !job.no_delete {
         collect_delete_operations(
@@ -911,6 +916,26 @@ fn build_plan(job: &Job) -> Result<(Vec<Operation>, usize)> {
     }
 
     Ok((plan, skipped))
+}
+
+fn remove_protected_make_dirs(
+    job: &Job,
+    protected_source_paths: &HashSet<PathBuf>,
+    plan: &mut Vec<Operation>,
+) {
+    if protected_source_paths.is_empty() {
+        return;
+    }
+
+    plan.retain(|operation| {
+        let Operation::MakeDir { path } = operation else {
+            return true;
+        };
+
+        relative_path(path, &job.dest)
+            .map(|rel| !is_protected_source_path(&rel, protected_source_paths))
+            .unwrap_or(true)
+    });
 }
 
 fn collect_source_operations(
@@ -950,7 +975,7 @@ fn collect_source_operations(
         source_entries.insert(rel.clone());
 
         if entry.file_type().is_dir() {
-            if !dest_path.is_dir() {
+            if !job.filters.excludes_dir(&rel, source_path) && !dest_path.is_dir() {
                 plan.push(Operation::MakeDir { path: dest_path });
             }
         } else if entry.file_type().is_file() {
@@ -1930,6 +1955,13 @@ mod tests {
         assert!(!plan.iter().any(|operation| {
             matches!(
                 operation,
+                Operation::MakeDir { path }
+                    if path.ends_with(Path::new("foo"))
+            )
+        }));
+        assert!(!plan.iter().any(|operation| {
+            matches!(
+                operation,
                 Operation::Copy { source, .. }
                     if source.ends_with(Path::new("foo/drop.txt"))
             )
@@ -1973,6 +2005,34 @@ mod tests {
                     if source.ends_with(Path::new("foo/drop.txt"))
             )
         }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_source_path_removes_planned_make_dir() {
+        let root = test_temp_dir("protected-mkdir");
+        let source = root.join("source");
+        let dest = root.join("dest");
+        let job = test_job(source, dest.clone(), Filters::default());
+        let mut protected = HashSet::new();
+        protected.insert(PathBuf::from("CallHistoryTransactions"));
+        let mut plan = vec![
+            Operation::MakeDir {
+                path: dest.join("CallHistoryTransactions"),
+            },
+            Operation::MakeDir {
+                path: dest.join("Firefox"),
+            },
+        ];
+
+        remove_protected_make_dirs(&job, &protected, &mut plan);
+
+        assert_eq!(plan.len(), 1);
+        assert!(matches!(
+            &plan[0],
+            Operation::MakeDir { path } if path.ends_with("Firefox")
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -372,11 +372,13 @@ This preserves some recovery room while still aligning the destination to the so
 vshdw --source D:\Data --dest E:\Backup\Data --no-delete
 ```
 
-During execution, vshdw shows a progress bar based on the planned operation count. Normal runs do not print per-file messages such as `copy:`. Pass `--no-progress` to show detailed operation logs. In `--dry-run`, vshdw lists planned operations without applying changes.
+During execution, vshdw shows a progress bar based on the planned operation count. Normal runs do not print per-file messages such as `copy:`. Pass `-v` or `--verbose` to print detailed logs for copies, deletes, trash moves, and directory creation. In `--dry-run`, vshdw lists planned operations without applying changes.
 
 ```bash
-vshdw --config default.toml --no-progress
+vshdw --config default.toml -v
 ```
+
+Pass `--no-progress` when you only want to disable the progress bar.
 
 Pass `--low-priority` to lower process priority for a one-off run.
 

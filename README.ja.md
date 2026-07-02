@@ -372,11 +372,13 @@ vshdw --source D:\Data --dest E:\Backup\Data --trash
 vshdw --source D:\Data --dest E:\Backup\Data --no-delete
 ```
 
-実行中は、計画した操作数をもとに進捗状況をプログレスバーで表示する。通常実行では `copy:` などのファイルごとのメッセージは表示しない。詳細ログを出したい場合は `--no-progress` を指定する。`--dry-run` の場合は、実際の変更を行わずに操作予定を一覧表示する。
+実行中は、計画した操作数をもとに進捗状況をプログレスバーで表示する。通常実行では `copy:` などのファイルごとのメッセージは表示しない。コピー、削除、ゴミ箱移動などの詳細ログを出したい場合は `-v` または `--verbose` を指定する。`--dry-run` の場合は、実際の変更を行わずに操作予定を一覧表示する。
 
 ```bash
-vshdw --config default.toml --no-progress
+vshdw --config default.toml -v
 ```
+
+プログレスバーだけを消したい場合は `--no-progress` を指定する。
 
 単発実行や一時的な実行で優先度を下げたい場合は `--low-priority` を指定する。
 
