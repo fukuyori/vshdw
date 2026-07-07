@@ -124,8 +124,8 @@ exclude_extensions = ["tmp"]
 | `use_gitignore` | boolean | `false` | source 配下の各 `.gitignore` を読み、マッチしたファイルやディレクトリを同期対象から外す。 |
 | `include_subdirs` | boolean | `true` | サブディレクトリを同期対象に含める。`false` の場合は `source` 直下のファイルだけを対象にする。 |
 | `dest_root` | string | unset | バックアップ先の共通ルート。これを指定すると、相対 `dest` と `dest_subdir` はこの配下のパスとして扱う。 |
-| `include_files` | string array | `[]` | 同期対象に含めるファイル。正規表現ではなく、ファイル名、相対パス、または絶対パスで指定する。空の場合はすべてのファイルを対象にする。 |
-| `include_file_patterns` | string array | `[]` | 同期対象に含めるファイルの正規表現。ファイル名、相対パス、絶対パスに対して判定する。 |
+| `include_files` | string array | `[]` | 除外条件に一致しても強制的にコピー対象へ戻すファイル。正規表現ではなく、ファイル名、相対パス、または絶対パスで指定する。ホワイトリストではなく、除外の上書きとして働く。 |
+| `include_file_patterns` | string array | `[]` | 除外条件に一致しても強制的にコピー対象へ戻すファイルの正規表現。ファイル名、相対パス、絶対パスに対して判定する。ホワイトリストではなく、除外の上書きとして働く。 |
 | `exclude_dirs` | string array | `[]` | 同期対象から外すディレクトリ。正規表現ではなく、ディレクトリ名、`source` から見た相対パス、または絶対パスで指定する。 |
 | `exclude_dir_patterns` | string array | `[]` | 同期対象から外すディレクトリの正規表現。相対パスと絶対パスの両方に対して判定する。 |
 | `exclude_files` | string array | `[]` | 同期対象から外すファイル。正規表現ではなく、ファイル名、相対パス、または絶対パスで指定する。 |
@@ -262,7 +262,7 @@ source = "/home/me/Data"
 exclude_dir_patterns = ['(^|[\\/¥])node_modules($|[\\/¥])']
 ```
 
-`.` で始まるファイルだけを対象にする例は次のとおりである。
+除外条件に一致しても、`.` で始まるファイルは必ずコピー対象へ戻す例は次のとおりである。
 
 ```toml
 include_file_patterns = ['(^|[\\/¥])\.[^\\/¥]+$']

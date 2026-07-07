@@ -1172,8 +1172,7 @@ impl Filters {
             return self.excludes_by_size(path);
         }
 
-        if !self.includes_file(rel, path)
-            || self.excludes_dir(rel, path)
+        if self.excludes_dir(rel, path)
             || self.matches_exclude_file(rel, path)
             || self.matches_file_pattern(rel, path)
             || self.matches_gitignore(rel, false)
@@ -1191,8 +1190,7 @@ impl Filters {
         }
 
         if (path.is_file()
-            && (!self.includes_file(rel, path)
-                || self.excludes_dir(rel, path)
+            && (self.excludes_dir(rel, path)
                 || self.matches_exclude_file(rel, path)
                 || self.matches_file_pattern(rel, path)
                 || self.matches_gitignore(rel, false)
@@ -1300,14 +1298,6 @@ impl Filters {
                     .iter()
                     .any(|pattern| pattern.is_match(&name.to_string_lossy()))
             })
-    }
-
-    fn includes_file(&self, rel: &Path, path: &Path) -> bool {
-        if self.include_files.is_empty() && self.include_file_patterns.is_empty() {
-            return true;
-        }
-
-        self.explicitly_includes_file(rel, path)
     }
 
     fn explicitly_includes_file(&self, rel: &Path, path: &Path) -> bool {
@@ -2003,6 +1993,45 @@ mod tests {
                 operation,
                 Operation::Copy { source, .. }
                     if source.ends_with(Path::new("foo/drop.txt"))
+            )
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_file_pattern_does_not_whitelist_other_files() {
+        let root = test_temp_dir("include-not-whitelist");
+        let source = root.join("source");
+        let dest = root.join("dest");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("main.go"), "package main").unwrap();
+        fs::write(source.join("archive.zip"), "zip").unwrap();
+
+        let job = test_job(
+            source,
+            dest,
+            Filters {
+                include_file_patterns: vec![Regex::new(r"(?i)\.zip$").unwrap()],
+                ..Filters::default()
+            },
+        );
+        let (plan, _) = build_plan(&job).unwrap();
+
+        // include_file_patterns is an override for excluded files, not a
+        // whitelist: files that do not match are still copied normally.
+        assert!(plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("main.go"))
+            )
+        }));
+        assert!(plan.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::Copy { source, .. }
+                    if source.ends_with(Path::new("archive.zip"))
             )
         }));
 

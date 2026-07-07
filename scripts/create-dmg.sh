@@ -5,40 +5,49 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/create-dmg.sh
-  scripts/create-dmg.sh --build --sign --notarize --staple
+  scripts/create-dmg.sh --no-notarize
+
+By default this builds, signs, notarizes, and staples: running with no options
+produces a distributable, notarized dmg. Use the --no-* flags to skip steps.
 
 Options:
   --binary PATH      executable to package. Defaults to target/release/vshdw.
-  --output PATH      dmg to create. Defaults to dist/vshdw-macos.dmg.
+  --output PATH      dmg to create. Defaults to dist/vshdw-<version>-macos_arm.dmg.
   --volume NAME      mounted volume name. Defaults to vshdw.
-  --build            run cargo build --release before packaging.
-  --sign             sign the executable before packaging.
-  --identity ID      codesign identity used with --sign. Defaults to CODESIGN_IDENTITY.
+  --build            run cargo build --release before packaging. Enabled by default.
+  --no-build         package the existing executable without rebuilding.
+  --sign             sign the executable and dmg. Enabled by default.
+  --no-sign          package without signing.
+  --identity ID      codesign identity used when signing. Defaults to CODESIGN_IDENTITY.
   --team-id ID       team ID used to auto-detect Developer ID. Defaults to CODESIGN_TEAM_ID or Q6GG27UYG5.
-  --force            replace an existing signature and output dmg.
-  --notarize         submit the dmg to Apple notary service.
+  --force            replace an existing signature and output dmg. Enabled by default.
+  --no-force         keep an existing signature and refuse to overwrite the output dmg.
+  --notarize         submit the dmg to Apple notary service. Enabled by default.
+  --no-notarize      skip notarization (and stapling).
   --profile NAME     notarytool keychain profile. Defaults to NOTARY_PROFILE or notarytool.
   --staple           staple the notary ticket to the dmg. Implied by --notarize.
   --no-staple        do not staple after notarization.
   -h, --help         show this help.
 
 Examples:
-  scripts/create-dmg.sh --build --sign
-  scripts/create-dmg.sh --build --sign --notarize
+  scripts/create-dmg.sh
+  scripts/create-dmg.sh --no-notarize
+  scripts/create-dmg.sh --no-build --no-sign --no-notarize
 USAGE
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)"
 binary="$repo_root/target/release/vshdw"
-output="$repo_root/dist/vshdw-macos.dmg"
+output="$repo_root/dist/vshdw-${version}-macos_arm.dmg"
 volume_name="vshdw"
 identity="${CODESIGN_IDENTITY:-}"
 team_id="${CODESIGN_TEAM_ID:-Q6GG27UYG5}"
 profile="${NOTARY_PROFILE:-notarytool}"
-build=false
-sign=false
-force=false
-notarize=false
+build=true
+sign=true
+force=true
+notarize=true
 staple=false
 staple_set=false
 
@@ -63,8 +72,16 @@ while [[ $# -gt 0 ]]; do
       build=true
       shift
       ;;
+    --no-build)
+      build=false
+      shift
+      ;;
     --sign)
       sign=true
+      shift
+      ;;
+    --no-sign)
+      sign=false
       shift
       ;;
     --identity)
@@ -81,8 +98,16 @@ while [[ $# -gt 0 ]]; do
       force=true
       shift
       ;;
+    --no-force)
+      force=false
+      shift
+      ;;
     --notarize)
       notarize=true
+      shift
+      ;;
+    --no-notarize)
+      notarize=false
       shift
       ;;
     --profile)
@@ -206,15 +231,18 @@ mkdir -p "$stage_dir"
 
 ditto "$binary" "$stage_dir/$(basename "$binary")"
 
+ln -s /Applications "$stage_dir/Applications"
+
 cat > "$stage_dir/README.txt" <<'README'
 vshdw is a command-line tool.
 
-To install it, copy the vshdw executable to a directory on your PATH, such as:
+Drag vshdw onto the Applications folder in this window to install it, then run
+it from Terminal:
 
-  /usr/local/bin
-  ~/.local/bin
+  /Applications/vshdw --help
 
-Then run:
+For convenience on the command line, copy vshdw to a directory on your PATH
+instead, such as /usr/local/bin or ~/.local/bin, and run:
 
   vshdw --help
 README
@@ -227,6 +255,25 @@ hdiutil create \
   "$output"
 
 hdiutil verify "$output"
+
+if [[ "$sign" == true ]]; then
+  dmg_identity="$identity"
+  if [[ -z "$dmg_identity" ]]; then
+    dmg_identity="$(
+      security find-identity -v -p codesigning 2>/dev/null \
+        | sed -nE 's/^[[:space:]]*[0-9]+\)[[:space:]]+[A-F0-9]+[[:space:]]+"(Developer ID Application: .* \('"$team_id"'\))"$/\1/p' \
+        | head -n 1
+    )"
+  fi
+  if [[ -n "$dmg_identity" && "$dmg_identity" != "-" ]]; then
+    dmg_sign_args=(--sign "$dmg_identity" --timestamp)
+    if [[ "$force" == true ]]; then
+      dmg_sign_args+=(--force)
+    fi
+    codesign "${dmg_sign_args[@]}" "$output"
+    codesign --verify --strict --verbose=2 "$output"
+  fi
+fi
 
 if [[ "$notarize" == true ]]; then
   xcrun notarytool submit "$output" \

@@ -124,8 +124,8 @@ exclude_extensions = ["tmp"]
 | `use_gitignore` | boolean | `false` | Read `.gitignore` files under the source and exclude matching files and directories from mirroring. |
 | `include_subdirs` | boolean | `true` | Include subdirectories. If `false`, only direct files under `source` are mirrored. |
 | `dest_root` | string | unset | Common destination root. When set, relative `dest` and `dest_subdir` values are resolved under this directory. |
-| `include_files` | string array | `[]` | Files to include. Values are literal filenames, relative paths, or absolute paths, not regular expressions. Empty means include all files. |
-| `include_file_patterns` | string array | `[]` | Regular expressions for files to include. They are tested against filenames, relative paths, and absolute paths. |
+| `include_files` | string array | `[]` | Files that are forced back into the copy set even when an exclude rule matches them. Values are literal filenames, relative paths, or absolute paths, not regular expressions. This is an override for excludes, not a whitelist. |
+| `include_file_patterns` | string array | `[]` | Regular expressions for files that are forced back into the copy set even when an exclude rule matches them. They are tested against filenames, relative paths, and absolute paths. This is an override for excludes, not a whitelist. |
 | `exclude_dirs` | string array | `[]` | Directories to exclude. Values are literal directory names, paths relative to `source`, or absolute paths, not regular expressions. |
 | `exclude_dir_patterns` | string array | `[]` | Regular expressions for directories to exclude. They are tested against both relative and absolute paths. |
 | `exclude_files` | string array | `[]` | Files to exclude. Values are literal filenames, relative paths, or absolute paths, not regular expressions. |
@@ -262,7 +262,7 @@ When writing directory separators in regular expressions, use a character class 
 exclude_dir_patterns = ['(^|[\\/¥])node_modules($|[\\/¥])']
 ```
 
-To include only files whose names start with `.`, use:
+To force files whose names start with `.` back into the copy set even when an exclude rule matches them, use:
 
 ```toml
 include_file_patterns = ['(^|[\\/¥])\.[^\\/¥]+$']
